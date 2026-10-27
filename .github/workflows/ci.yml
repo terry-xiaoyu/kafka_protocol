@@ -63,6 +63,7 @@ jobs:
           export KAFKA_VERSION=${{ matrix.kafka }}
           make test-env
           make eunit || (cd scripts && docker compose logs && exit 1)
+          rebar3 ct --suite test/kpro_compatibility_SUITE
           make cover
 
     - name: Upload coverage reports to Codecov

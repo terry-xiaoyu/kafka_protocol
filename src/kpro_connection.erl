@@ -572,13 +572,10 @@ sasl_authenticate(#state{client_id = ClientId, mod = Mod, sock = Sock, remote = 
   Timeout = get_connect_timeout(Config),
   Deadline = deadline(Timeout),
   SaslOpts = get_sasl_opt(Config),
-  HandshakeVsn = case Versions of
-                   #{sasl_handshake := {_, V}} -> V;
-                   _ -> 0
-                 end,
+  {HandshakeVsn, AuthenticateVsn} = sasl_versions(SaslOpts, Versions),
   ok = setopts(Sock, Mod, [{active, false}]),
   case kpro_sasl:auth(Host, Sock, Mod, ClientId,
-                      timeout(Deadline), SaslOpts, HandshakeVsn) of
+                      timeout(Deadline), SaslOpts, HandshakeVsn, AuthenticateVsn) of
     ok ->
       ok;
     {ok, ServerResponse} ->
@@ -595,6 +592,30 @@ sasl_authenticate(#state{client_id = ClientId, mod = Mod, sock = Sock, remote = 
   end,
   ok = setopts(Sock, Mod, [{active, once}]),
   State.
+
+%% Only built-in mechanisms negotiate the Authenticate API. Callbacks keep
+%% receiving the handshake version through their existing interface.
+sasl_versions({Mechanism, _, _}, Versions) when ?IS_PLAIN_OR_SCRAM(Mechanism) ->
+  HandshakeVsn = sasl_version(sasl_handshake, Versions),
+  AuthenticateVsn = case HandshakeVsn of
+                      0 -> 0;
+                      _ -> sasl_version(sasl_authenticate, Versions)
+                    end,
+  {HandshakeVsn, AuthenticateVsn};
+sasl_versions(_, Versions) ->
+  HandshakeVsn = case Versions of
+                   #{sasl_handshake := {_, V}} -> V;
+                   _ -> 0
+                 end,
+  {HandshakeVsn, 0}.
+
+sasl_version(API, Versions) ->
+  case Versions of
+    #{API := Range} ->
+      {_, Max} = kpro_api_vsn:intersect(API, Range),
+      Max;
+    _ -> 0
+  end.
 
 kafka_reply(_CallerPid, {msg, _SelfPid, #kpro_rsp{ref = {alias, Ref}}} = Msg) ->
   erlang:send(Ref, Msg),
