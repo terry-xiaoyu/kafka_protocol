@@ -32,6 +32,7 @@
 %%%_* API ======================================================================
 
 %% Keep the default Authenticate version for existing callers.
+%% Both entry points accept a final token after successful framed PLAIN auth.
 auth(Host, Sock, Mod, ClientId, Timeout, Opts, HandshakeVsn) ->
   auth(Host, Sock, Mod, ClientId, Timeout, Opts, HandshakeVsn, 0).
 

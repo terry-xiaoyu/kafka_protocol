@@ -583,7 +583,7 @@ sasl_authenticate(#state{client_id = ClientId, mod = Mod, sock = Sock, remote = 
         Lifetime when is_integer(Lifetime) andalso Lifetime > 0 ->
           %% Broker can report back a maximal session lifetime: https://kafka.apache.org/protocol#The_Messages_SaslAuthenticate.
           %% Respect the session lifetime by draining in-flight requests and re-authenticating in half the time.
-          ReauthenticationDeadline = Lifetime div 2,
+          ReauthenticationDeadline = reauthentication_delay(Lifetime),
           _ = erlang:send_after(ReauthenticationDeadline, self(), sasl_authenticate),
           ok;
         _ ->
@@ -592,6 +592,10 @@ sasl_authenticate(#state{client_id = ClientId, mod = Mod, sock = Sock, remote = 
   end,
   ok = setopts(Sock, Mod, [{active, once}]),
   State.
+
+%% Keep the timer positive and within the portable relative-timeout range.
+reauthentication_delay(Lifetime) ->
+  min(16#ffffffff, max(1, Lifetime div 2)).
 
 %% Only built-in mechanisms negotiate the Authenticate API. Callbacks keep
 %% receiving the handshake version through their existing interface.
@@ -800,6 +804,13 @@ timeout(Deadline) ->
   erlang:max(0, Deadline - erlang:monotonic_time(millisecond)).
 
 -ifdef(TEST).
+reauthentication_delay_test_() ->
+  [?_assertEqual(Expected, reauthentication_delay(Lifetime))
+   || {Lifetime, Expected} <- [{1, 1}, {2, 1}, {3, 1}, {4, 2}, {200, 100},
+                               {8589934590, 4294967295},
+                               {8589934592, 4294967295},
+                               {9223372036854775807, 4294967295}]].
+
 read_sasl_file_test_() ->
   Read = fun(Path) -> read_sasl_file(Path) end,
   BadFile = "README.md",

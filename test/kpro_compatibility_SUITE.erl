@@ -6,7 +6,7 @@
 -include("kpro.hrl").
 
 all() -> [jmq, authenticate_v1, plain_final_token, authenticate_v0, raw,
-          missing_versions, missing_authenticate, query_disabled, raw_nonempty, raw_closed, capped_versions, incompatible_versions,
+          missing_versions, missing_authenticate, query_disabled, raw_nonempty, raw_closed, capped_versions, incompatible_versions, long_lifetime, callback_long_lifetime,
           unauthenticated, callback, callback_legacy, legacy_auth, auth_error, closed, timeout,
           correlation_id, truncated, invalid_array, api_error,
           scram, bad_scram_signature, reauthentication].
@@ -37,7 +37,11 @@ raw_closed(_) -> failure(#{handshake => {0, 0}, raw_close => true}).
 capped_versions(_) -> success(#{handshake => {0, 5}, authenticate => {0, 5}}).
 incompatible_versions(_) ->
   lists:foreach(fun(Options) ->
-      with_broker(Options, fun(Port) -> ?assertMatch({error, _}, connect(Port, plain())) end)
+      with_broker(Options, fun(Port) ->
+          API = case Options of #{handshake := _} -> sasl_handshake; _ -> sasl_authenticate end,
+          ?assertMatch({error, {#{reason := incompatible_version_ranges, api := API,
+                                 supported := {0, 1}, received := {2, 3}}, _}}, connect(Port, plain()))
+        end)
     end, [#{handshake => {2, 3}}, #{authenticate => {2, 3}}]).
 unauthenticated(_) ->
   lists:foreach(fun(Options) -> with_broker(Options, fun(Port) ->
@@ -49,12 +53,13 @@ callback(_) ->
   lists:foreach(fun(Options) ->
       with_broker(Options, fun(Port) ->
           {ok, Pid} = connect(Port, {callback, ?MODULE, self()}),
-          receive {callback, Vsn} -> ?assertEqual(expected_handshake(Options), Vsn)
+          receive {callback, Vsn} -> ?assertEqual(advertised_handshake(Options), Vsn)
           after 1000 -> ct:fail(no_callback) end,
           ok = kpro_connection:stop(Pid)
         end)
     end, [#{handshake => missing, authenticate => missing},
-          #{handshake => {0, 1}, authenticate => {2, 3}}]).
+          #{handshake => {0, 1}, authenticate => {2, 3}},
+          #{handshake => {0, 5}, authenticate => {2, 3}}]).
 callback_legacy(_) ->
   with_broker(#{authenticate => {2, 3}}, fun(Port) ->
       {ok, Pid} = connect(Port, {callback, kpro_compatibility_callback, self()}),
@@ -63,13 +68,25 @@ callback_legacy(_) ->
       ok = kpro_connection:stop(Pid)
     end).
 
+auth(_, _, _Vsn, _, _, _, #{owner := Owner, lifetime := Lifetime}) ->
+  Owner ! callback_authenticated,
+  {ok, #{session_lifetime_ms => Lifetime}};
 auth(_, _, Vsn, _, _, _, Owner) -> Owner ! {callback, Vsn}, ok.
+long_lifetime(_) -> success(#{lifetime => 9223372036854775807}).
+callback_long_lifetime(_) ->
+  with_broker(#{}, fun(Port) ->
+      {ok, Pid} = connect(Port, {callback, ?MODULE, #{owner => self(), lifetime => 9223372036854775807}}),
+      receive callback_authenticated -> ok after 1000 -> ct:fail(no_callback) end,
+      ?assertMatch({ok, #kpro_rsp{}}, kpro:request_sync(Pid,
+          kpro_req_lib:make(metadata, 0, [{topics, []}]), 1000)),
+      ok = kpro_connection:stop(Pid)
+    end).
 legacy_auth(_) ->
-  with_broker(#{authenticate => {0, 0}}, fun(Port) ->
+  lists:foreach(fun(Token) -> with_broker(#{authenticate => {0, 0}, token => Token}, fun(Port) ->
       {ok, Sock} = gen_tcp:connect("127.0.0.1", Port, [binary, {packet, 4}, {active, false}]),
       ok = kpro_sasl:auth("127.0.0.1", Sock, gen_tcp, <<"test-client">>, 1000, plain(), 1),
       gen_tcp:close(Sock)
-    end).
+    end) end, [<<>>, <<"final-token">>]).
 auth_error(_) -> failure(#{error => 58}).
 closed(_) -> failure(#{failure => closed}).
 timeout(_) -> failure(#{failure => timeout}).
@@ -131,6 +148,8 @@ failure(Options) ->
       Mechanism = maps:get(mechanism, Options, plain),
       ?assertMatch({error, _}, connect(Port, {Mechanism, <<"test-user">>, <<"test-password">>}))
     end).
+advertised_handshake(Options) ->
+  case maps:get(handshake, Options, {0, 1}) of missing -> 0; {_, Max} -> Max end.
 expected_handshake(Options) -> expected_version(handshake, Options).
 expected_authenticate(Options) -> expected_version(authenticate, Options).
 expected_version(Key, Options) ->
